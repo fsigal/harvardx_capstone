@@ -1,0 +1,363 @@
+---
+title: "Marketing Campaign in a Portuguese Bank"
+author: "Facundo Sigal"
+date: "6/10/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,comment = NA)
+library(tidyverse)
+library(httr)
+library(gridExtra)
+library(Rborist)
+library(caret)
+```
+
+
+## Introduction
+
+In this work, I analyse the data from a marketing campaign of a Portuguese Bank. The marketing campaign was based on phone calls and sometimes, it required more than one call in order to get the potential client subscribed.
+The database includes 45211 observation of 17 variables. The output is a binary variable representing if the candidate had a subscription ("yes") or not ("no"). In order to predict the result of a single campaign, I'll train a Machine Learning algorithm based on some variables in this database. Some of them are data about the client itself, as age, marital status, job, educational level or credit history. Other variables represents the moment of the final contact between the bank and the client, as month, day o contacts.
+The main objective of this work is to find an algorithm that predicts if a potential client will become an account subscriber or not, using the information contained in the mentioned database. In order to achieve this goal, I'm training different machine learning techniques: Logistic Regression, Linear and Quadratic Discriminant Analysis, K Nearest Neighbors and Random Forest. An ensemble model that combines these three techniques will be adjusted also.
+The database will be divided into two separate sets: the train set which includes the 80% of the database, and the test set, that contains the remaining proportion. I've chosen this proportions **80/20** because in this case, I have a large sample, but not as large as the one I used in the Movielens project. This is a large set (almost 50k observations), so I sample a minor set to test the trained models.
+
+## Methods and Analysis
+
+The first step is getting the data I need. The database was downloaded directly from [UCI Machine Learning Repository](https://archive.ics.uci.edu/ml/index.php) with this code:
+
+```{r download, echo=TRUE}
+fs <- httr::GET("https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip")
+temp <- tempfile()
+download.file(fs$url,temp)
+```
+
+After that, I must import the downloaded file with this `read.csv` code:
+
+```{r bancos, echo=TRUE}
+bancos <- read.csv(unz(temp, "bank-full.csv"), sep = ";")
+```
+
+Then, some exploratory analysis have to be performed. The global rate of subscription is 
+```{r pressure, echo=FALSE}
+cat(mean(bancos$y == "yes"))
+```
+
+I should be careful with the measures used to evaluate the different models because the subscription rate is low (about 12%). This small prevalence produces "Accuracy" values that don't represent the real effectiveness of each model.
+
+Now let's take a look to some of the explanatory variables I've chosen and their relation with the output variable.
+
+#### Age
+
+Next table contains summary measures of the age of the candidates:
+```{r age-summary, echo=FALSE}
+summary(bancos$age)
+```
+
+The youngest candidate is 18 years old and the oldest is 95. The average age is almost 41 and the median is 39. The fact that the median is smaller than the mean is reasonable because the distribution of the variable *age* is positively asymmetric. 
+
+```{r age-graph, echo=FALSE, fig.width=5,fig.height=4}
+bancos %>% ggplot(aes(age)) + geom_histogram(aes(color = y),binwidth = 10) + facet_grid(y ~ ., scales = "free_y") + theme(legend.position = "none") + ggtitle("Histograms: Age classified by output")
+```
+
+As seen in this graph, the distribution of age is similar in both subscribers and non-subscribers group. The average age between subscribers is
+```{r age-comparison1, echo=FALSE}
+bancos1 <- bancos %>% filter(y == "yes")
+bancos0 <- bancos %>% filter(y == "no")
+cat(round(mean(bancos1$age),2))
+```
+The average age between non-subscribers is
+```{r age-comparison0, echo=FALSE}
+cat(round(mean(bancos0$age),2))
+```
+
+The difference between the average age of subscribers and non-subscribers is less than a year.
+
+#### Job
+
+In the following graph, the subscription rate is classified by the candidate's job.
+```{r job-graph1, include=FALSE}
+bancos_jobs <- bancos %>% group_by(job) %>%
+  summarize(perc.subs = mean(y == "yes"), n = n()) %>%
+  arrange(desc(perc.subs))
+```
+```{r job-graph2, echo=FALSE, fig.width=5,fig.height=4}
+bancos_jobs %>% ggplot(aes(perc.subs,job)) + geom_col() + xlab("Subscription Rate") + ggtitle("Subscription rates classified by candidate's job")
+```
+
+Students have the largest subscription rate. More than 25% of the contacted students got subscribed. Also between retired people, the marketing campaign was successful, with more than 20% of acceptance.
+The lower subscriptions rate correspond to people who work in Services, Housemaids, Entrepreneurs and Blue-Collar jobs, with less than 10% of acceptance.
+
+#### Marital Status
+
+In the next graph, there is a comparison of subscription rates between single, married and divorced people. This last category includes divorced and widowed candidates.
+```{r marital-graph1, include=FALSE}
+bancos_mar <- bancos %>% group_by(marital) %>%
+  summarize(perc.subs = mean(y == "yes"), n = n()) %>%
+  arrange(desc(perc.subs))
+```
+```{r marital-graph2, echo=FALSE, fig.width=6,fig.height=3}
+bancos_mar %>% ggplot(aes(perc.subs,marital)) + geom_col() + xlab("Subscription Rate") + ggtitle("Subscription rates classified by candidate's marital status")
+```
+
+Almost 15% of single people got their subscription and about 10% of married people did. The acceptance between divorced/widowed people is similar to global acceptance rate.
+
+#### Education
+
+In the next figure, the subscription rate is classified by the candidate's maximum educational level reached.
+```{r education-graph1, include=FALSE}
+bancos_ed <- bancos %>% group_by(education) %>%
+  summarize(perc.subs = mean(y == "yes"), n = n()) %>%
+  arrange(desc(perc.subs))
+```
+```{r education-graph2, echo=FALSE, fig.width=6,fig.height=3}
+bancos_ed %>% ggplot(aes(perc.subs,education)) + geom_col() + xlab("Subscription Rate") + ggtitle("Subscription rates classified by candidate's educational level")
+```
+
+As I expected, the rate of subscription increases for higher levels of education. The rate between people with at least tertiary education is 15%. For secondary and primary is about 10% a 8% respectively.
+
+#### Credit History
+
+Now it's time to analyze the credit records of each candidate. Here we can see the subscription rate according if they had defaults before, and if they had previous personal or housing loans.
+
+```{r credit-graph1, include=FALSE}
+bancos_def <- bancos %>% group_by(default) %>%
+  summarize(perc.subs = mean(y == "yes",na.rm = TRUE), n = n()) %>%
+  arrange(desc(perc.subs))
+default <- bancos_def %>% ggplot(aes(perc.subs,default)) + geom_col() +
+  scale_x_continuous(limits = c(0,0.2)) + xlab("Subscription Rate") +
+  ylab("Default")
+bancos_house <- bancos %>% group_by(housing) %>%
+  summarize(perc.subs = mean(y == "yes",na.rm = TRUE), n = n()) %>%
+  arrange(desc(perc.subs))
+housing <- bancos_house %>% ggplot(aes(perc.subs,housing)) + geom_col() + scale_x_continuous(limits = c(0,0.2)) + xlab("Subscription Rate") +
+  ylab("Housing Loan")
+bancos_pers <- bancos %>% group_by(loan) %>%
+  summarize(perc.subs = mean(y == "yes",na.rm = TRUE), n = n()) %>%
+  arrange(desc(perc.subs))
+personal <- bancos_pers %>% ggplot(aes(perc.subs,loan)) + geom_col() +
+  scale_x_continuous(limits = c(0,0.2)) + xlab("Subscription Rate") +
+  ylab("Personal Loan")
+library(grid)
+grid.newpage()
+```
+```{r credit-graph2, echo=FALSE, fig.width=5,fig.height=4}
+grid.draw(rbind(ggplotGrob(default), ggplotGrob(personal),
+                ggplotGrob(housing)))
+```
+
+Only 6% of the candidates that had previous defaults got an account subscription. People with previous loans rarely got their subscription. These rates were about 7% and 8% for previous personal and housing loans respectively.
+
+#### Type of contact
+
+In the following figure, there is a comparison of subscription rates between the type of last contact. Telephone means fixed-line phone.
+```{r type-graph1, include=FALSE}
+bancos_cont <- bancos %>% group_by(contact) %>%
+  summarize(perc.subs = mean(y == "yes"), n = n()) %>%
+  arrange(desc(perc.subs))
+```
+```{r type-graph2, echo=FALSE, fig.width=5,fig.height=3}
+bancos_cont %>% ggplot(aes(perc.subs,contact)) + geom_col() + xlab("Subscription Rate") + ggtitle("Subscription rates classified by type of contact")
+```
+
+We can't see major differences in subscription rates between fixed-line and mobile phone. A very low subscription is observed in clients with no registration of the type of contact they had.
+
+#### Month of last contact
+
+In this graph, the subscription rate is classified by the month when the subscription was confirmed.
+```{r month-graph1, include=FALSE}
+bancos_month <- bancos %>% group_by(month) %>%
+  summarize(perc.subs = mean(y == "yes"), n = n()) %>%
+  arrange(desc(perc.subs))
+```
+```{r month-graph2, echo=FALSE, fig.width=5,fig.height=3}
+bancos_month %>% mutate(month = fct_relevel(month, 
+                                           "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")) %>%
+  ggplot(aes(month,perc.subs)) + geom_col() +
+  ggtitle("Subscription rates per month")
+```
+
+There are four months with very high effectiveness. In march, more than a half of the people reached had their account subscription. In September, October and December the subscription rates were larger than 40%. On the other hand, in May the rate was about 6%.
+
+#### Day of the Month of last contact
+
+Now it's time to check if there is any time of the month when the subscription rates are larger. Here we can see the subscription rates classified by the day of the month.
+```{r day-graph1, include=FALSE}
+bancos_day <- bancos %>% group_by(day) %>%
+  summarize(perc.subs = mean(y == "yes"), n = n()) %>%
+  arrange(desc(perc.subs))
+```
+```{r day-graph2, echo=FALSE, fig.width=5,fig.height=3}
+bancos_day %>% ggplot(aes(day,perc.subs)) + geom_col() + ggtitle("Subscription rates per day of the month")
+```
+
+It doesn't seem to be a certain trend. The first and the tenth day of the month have larger subscription rates, over 20%. Most of the days between 22nd and 30th days, the daily rates are larger than the global rate of 12%.     
+
+#### Number of contacts
+
+The last explanatory variable describe is the number of contacts performed during the campaign with each client. Here we see two histograms for the number of contacts. The first one corresponds to people who didn't subscribe to the bank and the second belongs to subscribers. Each bar has a width of three contacts.
+
+```{r contacts-graph, echo=FALSE, fig.width=5,fig.height=3}
+bancos %>% ggplot(aes(campaign)) +
+  geom_histogram(aes(color = y),binwidth = 3) + 
+  facet_grid(y ~ ., scales = "free_y") + theme(legend.position = "none") + ggtitle("Histograms: Number of contacts classified by output")
+```
+
+Subscribers has a bigger proportion of people that received less than four contacts, while non-subscribers has larger proportion for the interval from 4 to 6 contacts.
+
+### Machine learning models/algorithms
+
+Once the exploratory analysis is done, it's time to begin with the machine learning techniques. The database was divided into two sets by random sampling. The 80% of the original database is used to train the models - called **train set** - and the remaining set is used to evaluate each model trained - called **test set**.
+
+The models/algorithms to be evaluated are (a) Logistic Regression; (b) Linear Discriminant Analysis; (c) Quadratic Discriminant Analysis; (d) K nearest neighbor and (e) Random Forest. There is a sixth technique that ensembles every model used before. The ensemble model assigns for each candidate the output that is chosen in three or more models from (a) to (e).
+
+The evaluation uses some measures that indicate how accurate are those models. As the output has a low prevalence of "yes", just looking to "Accuracy" isn't enough. We also must evaluate other measure as Sensitivity and Specificity.
+
+Sensitivity measure the ability of the algorithm to detect a "no" and Specificity indicates the proficiency to detect a "yes". As there is more than 88% of "no's", we expect to have much higher Sensitivity than Specificity.
+
+## Results
+
+```{r base_split, include=FALSE}
+# Test set will be 20% of data
+set.seed(2015, sample.kind="Rounding")
+test_index <- createDataPartition(y = bancos$y, times = 1, p = 0.2, list = FALSE)
+train_set <- bancos[-test_index,]
+test_set <- bancos[test_index,]
+```
+
+Before we start training models, let's see what happens if we assign "no" to every candidate in the **test set**.
+
+#### "No" for everybody
+```{r no, echo=FALSE, warning=FALSE}
+# Setting every output as "no"
+test_set <- test_set %>% mutate(all_no = "no")
+cat(paste("Sensitivity:",
+          round(confusionMatrix(as.factor(test_set$all_no),as.factor(test_set$y))$byClass["Sensitivity"],5)))
+cat(paste("Specificity:",
+          round(confusionMatrix(as.factor(test_set$all_no),as.factor(test_set$y))$byClass["Specificity"],5)))
+cat(paste("Accuracy:",
+          round(confusionMatrix(as.factor(test_set$all_no),as.factor(test_set$y))$overall["Accuracy"],5)))
+```
+
+The first model to train is logistic regression. This model estimate the probability of each candidate to have a "yes" using regression technique.
+
+```{r logit1, include=FALSE}
+# Logistic Regression
+train_logit <- train(y~age+job+marital+education+default+housing+loan+
+                       contact+day+month+campaign,
+                     method = "glm", data = train_set)
+summary(train_logit)
+```
+
+In a first estimation, there were two variables that weren't statistically significant: *Default* and *Day of the Month*. Hence, the final logistic regression doesn't include those two.
+
+#### Logistic Regression
+```{r logit2, echo=FALSE}
+# Without default and day
+train_logit <- train(y~age+job+marital+education+housing+loan+contact+
+                       month+campaign, method = "glm", data = train_set)
+y_hat_logit <- predict(train_logit, test_set, type = "raw")
+cat(paste("Sensitivity:",
+          round(confusionMatrix(y_hat_logit,as.factor(test_set$y))$byClass["Sensitivity"],5)))
+cat(paste("Specificity:",
+          round(confusionMatrix(y_hat_logit,as.factor(test_set$y))$byClass["Specificity"],5)))
+cat(paste("Accuracy:",
+          round(confusionMatrix(y_hat_logit,as.factor(test_set$y))$overall["Accuracy"],5)))
+```
+
+The next techniques to train are Discriminant Analyses. Firstly with a Linear Model and then with a Quadratic Model.
+
+#### Linear Discriminant Analysis
+```{r lda, echo=FALSE}
+train_lda <- train(as.factor(y)~age+job+marital+education+housing+loan+
+                    contact+month+campaign+day, method = "lda",
+                   data = train_set)
+y_hat_lda <- predict(train_lda, test_set, type = "raw")
+cat(paste("Sensitivity:",
+          round(confusionMatrix(y_hat_lda,as.factor(test_set$y))$byClass["Sensitivity"],5)))
+cat(paste("Specificity:",
+          round(confusionMatrix(y_hat_lda,as.factor(test_set$y))$byClass["Specificity"],5)))
+cat(paste("Accuracy:",
+          round(confusionMatrix(y_hat_lda,as.factor(test_set$y))$overall["Accuracy"],5)))
+```
+#### Quadratic Discriminant Analysis
+```{r qda, echo=FALSE}
+train_qda <- train(as.factor(y)~age+job+marital+education+housing+loan+
+                     contact+month+campaign+day, method = "qda",
+                   data = train_set)
+y_hat_qda <- predict(train_qda, test_set, type = "raw")
+cat(paste("Sensitivity:",
+          round(confusionMatrix(y_hat_qda,as.factor(test_set$y))$byClass["Sensitivity"],5)))
+cat(paste("Specificity:",
+          round(confusionMatrix(y_hat_qda,as.factor(test_set$y))$byClass["Specificity"],5)))
+cat(paste("Accuracy:",
+          round(confusionMatrix(y_hat_qda,as.factor(test_set$y))$overall["Accuracy"],5)))
+```
+
+Finally we have the most complex algorithms: K nearest neighbor and Random Forest. These techniques include an optimization of their parameters using the `tuneGrid` option.
+
+#### K nearest neighbor
+```{r knn, echo=FALSE}
+train_knn <- train(as.factor(y)~age+job+marital+education+housing+loan+
+                     contact+month+campaign+day, method = "knn",
+                   tuneGrid = data.frame(k = c(1,3,5,7,9)),
+                   data = train_set)
+y_hat_knn <- predict(train_knn, test_set, type = "raw")
+cat(paste("Sensitivity:",
+          round(confusionMatrix(y_hat_knn,as.factor(test_set$y))$byClass["Sensitivity"],5)))
+cat(paste("Specificity:",
+          round(confusionMatrix(y_hat_knn,as.factor(test_set$y))$byClass["Specificity"],5)))
+cat(paste("Accuracy:",
+          round(confusionMatrix(y_hat_knn,as.factor(test_set$y))$overall["Accuracy"],5)))
+```
+#### Random Forest
+```{r rf, echo=FALSE, warning=FALSE}
+train_rf <- train(as.factor(y)~age+job+marital+education+housing+loan+
+                     contact+month+campaign+day, method = "Rborist",
+                   tuneGrid = expand.grid(minNode = 1:5,
+                                          predFixed = c(10,15,20,25,30)),
+                  nTree = 100, nSamp = 5000,data = train_set)
+y_hat_rf <- predict(train_rf, test_set, type = "raw")
+cat(paste("Sensitivity:",
+          round(confusionMatrix(y_hat_rf,as.factor(test_set$y))$byClass["Sensitivity"],5)))
+cat(paste("Specificity:",
+          round(confusionMatrix(y_hat_rf,as.factor(test_set$y))$byClass["Specificity"],5)))
+cat(paste("Accuracy:",
+          round(confusionMatrix(y_hat_rf,as.factor(test_set$y))$overall["Accuracy"],5)))
+```
+
+After all these training, we finally use the ensemble to combined every technique used to estimate the output for the test set.
+
+#### Ensemble
+```{r ensemble, echo=FALSE}
+y_hat_ensemble <- as.factor(ifelse(((y_hat_lda == "yes") +
+                            (y_hat_qda == "yes") +
+                            (y_hat_logit == "yes") +
+                              (y_hat_knn == "yes") +
+                              (y_hat_rf == "yes")) < 3,"no","yes" ))
+cat(paste("Sensitivity:",
+          round(confusionMatrix(y_hat_ensemble,as.factor(test_set$y))$byClass["Sensitivity"],5)))
+cat(paste("Specificity:",
+          round(confusionMatrix(y_hat_ensemble,as.factor(test_set$y))$byClass["Specificity"],5)))
+cat(paste("Accuracy:",
+          round(confusionMatrix(y_hat_ensemble,as.factor(test_set$y))$overall["Accuracy"],5)))
+```
+
+## Conclusion
+
+This work has the main objective of finding an algorithm capable of predicting if the potential clients finally get 
+their account subscription in the bank. In order to achieve that, several models and algorithms were applied for training the database.
+
+These methods produced different results. There is no model or algorithm that perform well according to every measure used to evaluate them. Thus, the conclusion are presented separately for each measure.
+
+When we consider the capability of the procedures to identify the "no's", all methods have excellent performance.
+The highest sensibilities are produced by K Nearest Neighbor, Random Forest and Logistic Regression. Their sensibilities are about 99%.
+
+However, these procedures weren't able to identify the "yes" accurately, because this is an event with very 
+small prevalence (under 12%). The best performance was achieved by Quadratic Discriminant Analysis, by far. It produced a specificity of 32%. QDA's specificity almost doubles the specificity of the next model in descending order - Linear Discriminant Analysis has a specificity of 18%.
+
+Accuracy is highly influenced by prevalence. As the prevalence is low, larger values of Accuracy will be closely related to higher sensitivities. The best accuracy is achieved by Ensemble, Random Forest K nearest neighbor and Logistic Regression. Quadratic Discriminant Analysis, which is the model that produced the highest specificity, has the lowest accuracy. QDA was the only model that produced lower accuracy than assigning "no" to every candidate.
+
+The Ensemble of the five methods produced a specificity of almost 13% (nearly a median value) without losing sensibility. The accuracy of the Ensemble method is the highest one, similar to the accuracy achieved by K Nearest Neighbor.
+
+This work presents a strong background for estimating the result of a marketing campaign, just considering some information about the potential client. There is a limitation about the results found in this work. The algorithms trained here aren't capable to identify the successful campaigns with much accuracy. The only model that identifies almost one out of three subscribers is the Quadratic Discriminant Analysis. There is a lot of work to do in the future. Basically, there is a deficiency that must be improved in the detection of the candidates who will end up being subscribers.
